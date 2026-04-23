@@ -1,5 +1,5 @@
 import type { ExchangeState } from "../market/marketStore.js";
-import { Level } from "../orderbook/orderbook.js";
+import type { Level } from "../orderbook/orderbook.js";
 import Calc from "./calc.js";
 import dotenv from "dotenv";
 
@@ -16,6 +16,10 @@ export const EXEC_QUANTITY_MIN =
   Number(process.env.EXEC_QUANTITY_MIN) > 0
     ? Number(process.env.EXEC_QUANTITY_MIN)
     : 100;
+export const MAX_BOOK_AGE_MS =
+  Number(process.env.MAX_BOOK_AGE_MS) > 0
+    ? Number(process.env.MAX_BOOK_AGE_MS)
+    : 3000;
 
 export type Fee = {
   taker: number; // e.g. 0.001 = 0.1%
@@ -45,13 +49,38 @@ const clampExecQty = (asks: Level[], bids: Level[], maxQty: number): number => {
   return Math.min(maxQty, fillableQty(asks), fillableQty(bids));
 };
 
+const buildQuantityCandidates = (
+  minQty: number,
+  maxQty: number,
+  steps: number = 10,
+): number[] => {
+  if (maxQty < minQty) return [];
+  if (maxQty === minQty) return [maxQty];
+
+  const candidateSet = new Set<number>([minQty, maxQty]);
+  const stepSize = (maxQty - minQty) / Math.max(steps - 1, 1);
+
+  for (let i = 1; i < steps - 1; i += 1) {
+    const qty = minQty + i * stepSize;
+    if (qty > minQty && qty < maxQty) {
+      candidateSet.add(qty);
+    }
+  }
+
+  return Array.from(candidateSet).sort((a, b) => a - b);
+};
+
 const calculateArbitrage = (
   snapshot: ExchangeState[],
 ): ArbitrageOpportunity | null => {
   let best: ArbitrageOpportunity | null = null;
+  const now = Date.now();
+  const freshSnapshot = snapshot.filter(
+    (ex) => now - ex.timestamp <= MAX_BOOK_AGE_MS,
+  );
 
-  for (const buyEx of snapshot) {
-    for (const sellEx of snapshot) {
+  for (const buyEx of freshSnapshot) {
+    for (const sellEx of freshSnapshot) {
       if (buyEx.exchange === sellEx.exchange) continue;
       if (!buyEx.asks.length || !sellEx.bids.length) continue;
 
@@ -61,34 +90,35 @@ const calculateArbitrage = (
       // const rawSellPx = sellEx.sell ?? sellEx.bestBid;
       // if (rawBuyPx === null || rawSellPx === null) continue;
 
-      const quantity = clampExecQty(buyEx.asks, sellEx.bids, EXEC_QUANTITY_MAX);
-      if (quantity < EXEC_QUANTITY_MIN) continue;
-
-      const buyVWAP = Calc.avgExecPrice(buyEx.asks, quantity);
-      const sellVWAP = Calc.avgExecPrice(sellEx.bids, quantity);
-      if (!buyVWAP || !sellVWAP) continue;
-
       const buyFee = fees[buyEx.exchange]?.taker ?? 0;
       const sellFee = fees[sellEx.exchange]?.taker ?? 0;
+      const maxQty = clampExecQty(buyEx.asks, sellEx.bids, EXEC_QUANTITY_MAX);
+      const quantities = buildQuantityCandidates(EXEC_QUANTITY_MIN, maxQty);
 
-      const effectiveBuyPrice = buyVWAP.toNumber() * (1 + buyFee);
-      const effectiveSellPrice = sellVWAP.toNumber() * (1 - sellFee);
+      for (const quantity of quantities) {
+        const buyVWAP = Calc.avgExecPrice(buyEx.asks, quantity);
+        const sellVWAP = Calc.avgExecPrice(sellEx.bids, quantity);
+        if (!buyVWAP || !sellVWAP) continue;
 
-      const profitPerUnit = effectiveSellPrice - effectiveBuyPrice;
-      const grossProfit = new Decimal(quantity).mul(profitPerUnit).toNumber();
+        const effectiveBuyPrice = buyVWAP.toNumber() * (1 + buyFee);
+        const effectiveSellPrice = sellVWAP.toNumber() * (1 - sellFee);
 
-      if (!best || grossProfit > best.grossProfit) {
-        best = {
-          buyEx,
-          sellEx,
-          buyFrom: buyEx.exchange,
-          sellTo: sellEx.exchange,
-          quantity,
-          profitPerUnit,
-          grossProfit,
-          effectiveBuyPrice: new Decimal(effectiveBuyPrice).toNumber(),
-          effectiveSellPrice: new Decimal(effectiveSellPrice).toNumber(),
-        };
+        const profitPerUnit = effectiveSellPrice - effectiveBuyPrice;
+        const grossProfit = new Decimal(quantity).mul(profitPerUnit).toNumber();
+
+        if (!best || grossProfit > best.grossProfit) {
+          best = {
+            buyEx,
+            sellEx,
+            buyFrom: buyEx.exchange,
+            sellTo: sellEx.exchange,
+            quantity,
+            profitPerUnit,
+            grossProfit,
+            effectiveBuyPrice: new Decimal(effectiveBuyPrice).toNumber(),
+            effectiveSellPrice: new Decimal(effectiveSellPrice).toNumber(),
+          };
+        }
       }
     }
   }
