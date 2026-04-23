@@ -4,6 +4,7 @@ dotenv.config();
 
 import NobitexWS from "./adapters/nobitex.ws.js";
 import BitPinWS from "./adapters/bitpin.ws.js";
+import TabdealWS from "./adapters/tabdeal.ws.js";
 
 import eventBus from "./events/eventBus.js";
 
@@ -19,7 +20,6 @@ eventBus.on("orderbook:update", ({ exchange, bids, asks }) => {
   updateMap(exchange, bids, asks);
   const marketMap = getMarketMap();
   const arbitrage = calculateArbitrage(marketMap);
-  // console.log(marketMap);
   if (arbitrage) console.log(arbitrage);
 });
 
@@ -38,6 +38,14 @@ const bitpin = new BitPinWS(
 );
 bitpin.connect();
 bitpin.subscribe("orderbook:USDT_IRT");
+
+const tabdeal = new TabdealWS(
+  process.env.TABDEAL_CONVERT_RIAL_TO_TOMAN === "true"
+    ? { convertRialToToman: true }
+    : undefined,
+);
+tabdeal.connect();
+tabdeal.subscribe("usdtirt@depth@2000ms");
 
 const PORT = process.env.PORT || 4000;
 
